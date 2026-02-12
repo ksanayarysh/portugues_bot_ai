@@ -226,7 +226,7 @@ class Database:
                 VALUES ($1, $2, $3, $4)
                 RETURNING id
                 """,
-                user_id, topic, level, json.dumps(content)
+                user_id, topic, level, asyncpg.types.Json(content)
             )
             lesson_id = row['id']
             logger.info(f"Saved lesson {lesson_id} for user {user_id}, topic: {topic}")

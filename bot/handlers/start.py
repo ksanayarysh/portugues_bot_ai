@@ -152,23 +152,15 @@ async def cmd_resume(message: Message, db):
 
 
 from aiogram import html
-
-from aiogram import html
 from datetime import date
 
-# простенький кэш на случай, если в db нет методов хранения урока
-_DAILY_LESSON_CACHE: dict[tuple[int, str], dict] = {}
-
-
-from datetime import date
-from aiogram import html
-
-# in-memory трекинг тем, если БД не умеет хранить "темы, выданные сегодня"
+# In-memory fallback (если БД недоступна/пока пустая) — сбросится при рестарте.
 _TODAY_TOPICS: dict[tuple[int, str], set[str]] = {}
 
 
 @router.callback_query(F.data == "get_lesson")
 async def callback_get_lesson(callback_query, db, config):
+    """Выдать НОВЫЙ урок при каждом нажатии (даже в один день)."""
     from bot.ai.generator import LessonGenerator
 
     user_id = callback_query.from_user.id
@@ -180,67 +172,74 @@ async def callback_get_lesson(callback_query, db, config):
         model=getattr(config, "CLAUDE_MODEL", "claude-sonnet-4-20250514"),
     )
 
-    # 1) Собираем список тем, которые уже выдавались пользователю раньше
+    # Темы, которые уже выдавались раньше (берём много, чтобы не повторяться).
     previous_topics: list[str] = []
     if hasattr(db, "get_recent_lesson_topics"):
         previous_topics = await db.get_recent_lesson_topics(user_id=user_id, limit=500) or []
     elif hasattr(db, "get_completed_topics"):
         previous_topics = await db.get_completed_topics(user_id=user_id) or []
 
-    # 2) Плюс темы, которые уже выдавались СЕГОДНЯ (чтобы не повторяться в течение дня)
-    today_topics = set()
+    # Темы, которые уже выдавались сегодня (чтобы не повторяться в рамках дня).
+    today_topics: set[str] = set()
     if hasattr(db, "get_today_topics"):
         today_topics = set(await db.get_today_topics(user_id=user_id, day=today) or [])
     else:
         today_topics = _TODAY_TOPICS.get(key, set())
 
-    # 3) Генерим персонализированный урок, исключая и прошлые, и сегодняшние
+    # Статы пользователя (уровень/сложные темы), если есть.
     user_stats = {}
     if hasattr(db, "get_user_stats"):
         user_stats = await db.get_user_stats(user_id) or {}
 
+    # Генерим следующий урок, исключая уже выданные темы.
+    exclude_topics = list(dict.fromkeys(previous_topics + list(today_topics)))
     lesson = gen.generate_personalized_lesson(
         user_stats=user_stats,
-        previous_lessons=list(dict.fromkeys(previous_topics + list(today_topics))),  # уникальные, сохраняя порядок
+        previous_lessons=exclude_topics,
     )
 
-    # 4) Запоминаем, что эта тема уже выдавалась сегодня
+    # Сохраняем в БД СРАЗУ, чтобы следующая кнопка уже видела историю.
+    lesson_id = None
+    if hasattr(db, "save_lesson"):
+        lesson_id = await db.save_lesson(
+            user_id=user_id,
+            topic=lesson.get("_topic") or "unknown",
+            level=lesson.get("_level") or user_stats.get("level") or "intermediate",
+            content=lesson,
+        )
+
+    # Фолбэк: если БД нет/не работает, хотя бы не повторяться до рестарта.
     topic = lesson.get("_topic")
     if topic:
-        if hasattr(db, "save_today_topic"):
-            await db.save_today_topic(user_id=user_id, day=today, topic=topic)
-        else:
-            s = _TODAY_TOPICS.get(key, set())
-            s.add(topic)
-            _TODAY_TOPICS[key] = s
+        s = _TODAY_TOPICS.get(key, set())
+        s.add(topic)
+        _TODAY_TOPICS[key] = s
 
     # ---- Рендер урока ----
     title = html.quote(lesson.get("title", "🇧🇷 Урок"))
     explanation = html.quote(lesson.get("explanation", ""))
 
-    lines = [f"<b>{title}</b>\n", explanation, "\n"]
+    lines = [f"<b>{title}</b>", explanation, ""]
+
     for ex in (lesson.get("examples") or [])[:3]:
         pt = html.quote(ex.get("portuguese", ""))
         ru = html.quote(ex.get("russian", ""))
         note = html.quote(ex.get("note", ""))
-        lines.append(f"• <b>{pt}</b>\n  {ru}\n  <i>{note}</i>\n")
+        lines.append(f"• <b>{pt}</b>{ru} <i>{note}</i>")
 
     if lesson.get("tip"):
-        lines.append(f"\n💡 <b>Совет:</b> {html.quote(lesson['tip'])}")
+        lines.append(f"💡 <b>Совет:</b> {html.quote(lesson['tip'])}")
 
     if lesson.get("practice"):
-        lines.append(f"\n\n✍️ <b>Практика:</b>\n{html.quote(lesson['practice'])}")
+        lines.append(f"<b>Практика:</b>{html.quote(lesson['practice'])}")
 
-    await callback_query.message.answer("\n".join(lines), parse_mode="HTML")
+    await callback_query.message.answer("".join(lines), parse_mode="HTML")
     await callback_query.answer()
 
-    logger.info("User %s got lesson topic=%s day=%s", user_id, topic, today)
-
-    lesson_id = await db.save_lesson(
-        user_id=user_id,
-        topic=lesson.get("_topic") or "unknown",
-        level=lesson.get("_level") or "intermediate",
-        content=lesson,
+    logger.info(
+        "User %s got lesson id=%s topic=%s day=%s",
+        user_id,
+        lesson_id,
+        topic,
+        today,
     )
-
-
