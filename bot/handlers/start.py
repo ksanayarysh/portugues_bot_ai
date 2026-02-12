@@ -236,3 +236,11 @@ async def callback_get_lesson(callback_query, db, config):
 
     logger.info("User %s got lesson topic=%s day=%s", user_id, topic, today)
 
+    lesson_id = await db.save_lesson(
+        user_id=user_id,
+        topic=lesson.get("_topic") or "unknown",
+        level=lesson.get("_level") or "intermediate",
+        content=lesson,
+    )
+
+

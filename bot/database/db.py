@@ -3,7 +3,7 @@ PostgreSQL Database module for AI Portuguese Bot
 """
 import asyncpg
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, List, Dict, Any
 import json
 
@@ -317,3 +317,51 @@ class Database:
             if lessons_stats:
                 result.update(dict(lessons_stats))
             return result
+
+    async def get_today_topics(self, user_id: int, day: str | None = None) -> List[str]:
+        """
+        Темы, которые уже выдавались пользователю СЕГОДНЯ (по UTC-датe, если не указано иначе).
+        day: 'YYYY-MM-DD' (опционально)
+        """
+        if day is None:
+            day = date.today().isoformat()
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT topic
+                FROM lessons
+                WHERE user_id = $1
+                  AND created_at::date = $2::date
+                ORDER BY topic
+                """,
+                user_id, day
+            )
+            return [r["topic"] for r in rows]
+
+    async def get_recent_lesson_topics(self, user_id: int, limit: int = 500) -> List[str]:
+        """
+        Темы, которые уже выдавались пользователю (самые свежие сверху).
+        Это лучше, чем completed_topics, потому что у тебя feedback/completed может быть не всегда.
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT topic
+                FROM lessons
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                user_id, limit
+            )
+            return [r["topic"] for r in rows]
+
+    async def save_today_topic(self, user_id: int, day: str, topic: str) -> None:
+        """
+        Ничего отдельного не сохраняем: сам факт "тема выдана сегодня" фиксируется строкой lessons.
+        Этот метод оставлен, потому что твой start.py его зовёт.
+        Здесь можно просто no-op или проверку, но лучше вообще не использовать его отдельно.
+        """
+        # Ничего не делаем: это уже фиксируется в lessons при save_lesson()
+        return
