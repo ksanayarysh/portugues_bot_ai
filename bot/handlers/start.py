@@ -151,35 +151,42 @@ async def cmd_resume(message: Message, db):
     logger.info(f"User {user_id} resumed lessons")
 
 
+from aiogram import html
+
 @router.callback_query(F.data == "get_lesson")
 async def callback_get_lesson(callback_query, db, config):
-    """Получить случайный урок прямо сейчас."""
-    from bot.lessons.loader import LessonLoader
-    from bot.lessons.formatter import format_lesson
-    
+    from bot.ai.generator import LessonGenerator  # <-- поправь путь, если у тебя иначе лежит generator.py
+
     user_id = callback_query.from_user.id
-    
-    # Загружаем уроки
-    loader = LessonLoader(config.LESSONS_PATH)
-    lessons = loader.get_all_lessons()
-    
-    # Получаем пройденные уроки
-    completed = await db.get_completed_lessons(user_id)
-    
-    # Находим непройденный урок
-    available = [l for l in lessons if l['id'] not in completed]
-    
-    if not available:
-        # Все уроки пройдены - начинаем сначала
-        available = lessons
-    
-    # Берём первый доступный
-    lesson = available[0]
-    
-    # Форматируем и отправляем
-    lesson_text, keyboard = format_lesson(lesson)
-    
-    await callback_query.message.answer(lesson_text, reply_markup=keyboard, parse_mode="HTML")
+
+    gen = LessonGenerator(
+        api_key=config.ANTHROPIC_API_KEY,
+        model=getattr(config, "CLAUDE_MODEL", "claude-sonnet-4-20250514"),
+    )
+
+    # Можно брать тему из конфига/БД, пока просто дефолт:
+    lesson = gen.generate_lesson(topic="por_vs_para", level="intermediate")
+
+    title = html.quote(lesson.get("title", "🇧🇷 Урок"))
+    explanation = html.quote(lesson.get("explanation", ""))
+
+    lines = [f"<b>{title}</b>\n", explanation, "\n"]
+    examples = lesson.get("examples") or []
+    for ex in examples[:3]:
+        pt = html.quote(ex.get("portuguese", ""))
+        ru = html.quote(ex.get("russian", ""))
+        note = html.quote(ex.get("note", ""))
+        lines.append(f"• <b>{pt}</b>\n  {ru}\n  <i>{note}</i>\n")
+
+    tip = lesson.get("tip")
+    if tip:
+        lines.append(f"\n💡 <b>Совет:</b> {html.quote(tip)}")
+
+    practice = lesson.get("practice")
+    if practice:
+        lines.append(f"\n\n✍️ <b>Практика:</b>\n{html.quote(practice)}")
+
+    await callback_query.message.answer("\n".join(lines), parse_mode="HTML")
     await callback_query.answer()
     
     logger.info(f"User {user_id} requested lesson {lesson['id']}")
