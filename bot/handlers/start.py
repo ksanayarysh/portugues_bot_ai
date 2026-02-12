@@ -160,65 +160,65 @@ from datetime import date
 _DAILY_LESSON_CACHE: dict[tuple[int, str], dict] = {}
 
 
+from datetime import date
+from aiogram import html
+
+# in-memory трекинг тем, если БД не умеет хранить "темы, выданные сегодня"
+_TODAY_TOPICS: dict[tuple[int, str], set[str]] = {}
+
+
 @router.callback_query(F.data == "get_lesson")
 async def callback_get_lesson(callback_query, db, config):
-    from bot.ai.generator import LessonGenerator  # путь у тебя такой, как в текущем файле
+    from bot.ai.generator import LessonGenerator
 
     user_id = callback_query.from_user.id
     today = date.today().isoformat()
-    cache_key = (user_id, today)
+    key = (user_id, today)
 
-    # 1) Пытаемся достать "урок на сегодня" из БД, если у db есть такой метод
-    lesson = None
-    if hasattr(db, "get_daily_lesson"):
-        lesson = await db.get_daily_lesson(user_id=user_id, day=today)
+    gen = LessonGenerator(
+        api_key=config.ANTHROPIC_API_KEY,
+        model=getattr(config, "CLAUDE_MODEL", "claude-sonnet-4-20250514"),
+    )
 
-    # 2) Если в БД нет, пытаемся из памяти (переживает в рамках процесса)
-    if lesson is None:
-        lesson = _DAILY_LESSON_CACHE.get(cache_key)
+    # 1) Собираем список тем, которые уже выдавались пользователю раньше
+    previous_topics: list[str] = []
+    if hasattr(db, "get_recent_lesson_topics"):
+        previous_topics = await db.get_recent_lesson_topics(user_id=user_id, limit=500) or []
+    elif hasattr(db, "get_completed_topics"):
+        previous_topics = await db.get_completed_topics(user_id=user_id) or []
 
-    # 3) Если урока на сегодня нет, генерим новый и сохраняем
-    if lesson is None:
-        gen = LessonGenerator(
-            api_key=config.ANTHROPIC_API_KEY,
-            model=getattr(config, "CLAUDE_MODEL", "claude-sonnet-4-20250514"),
-        )
+    # 2) Плюс темы, которые уже выдавались СЕГОДНЯ (чтобы не повторяться в течение дня)
+    today_topics = set()
+    if hasattr(db, "get_today_topics"):
+        today_topics = set(await db.get_today_topics(user_id=user_id, day=today) or [])
+    else:
+        today_topics = _TODAY_TOPICS.get(key, set())
 
-        # Берём статистику и историю тем (если у db есть методы)
-        user_stats = {}
-        if hasattr(db, "get_user_stats"):
-            user_stats = await db.get_user_stats(user_id) or {}
+    # 3) Генерим персонализированный урок, исключая и прошлые, и сегодняшние
+    user_stats = {}
+    if hasattr(db, "get_user_stats"):
+        user_stats = await db.get_user_stats(user_id) or {}
 
-        previous_topics: list[str] = []
-        if hasattr(db, "get_completed_topics"):
-            previous_topics = await db.get_completed_topics(user_id=user_id) or []
-        elif hasattr(db, "get_recent_lesson_topics"):
-            previous_topics = await db.get_recent_lesson_topics(user_id=user_id, limit=200) or []
+    lesson = gen.generate_personalized_lesson(
+        user_stats=user_stats,
+        previous_lessons=list(dict.fromkeys(previous_topics + list(today_topics))),  # уникальные, сохраняя порядок
+    )
 
-        lesson = gen.generate_personalized_lesson(
-            user_stats=user_stats,
-            previous_lessons=previous_topics,
-        )
-
-        # Сохраняем урок на сегодня (если db умеет)
-        if hasattr(db, "save_daily_lesson"):
-            await db.save_daily_lesson(
-                user_id=user_id,
-                day=today,
-                topic=lesson.get("_topic"),
-                level=lesson.get("_level"),
-                lesson_json=lesson,
-            )
-
-        # И всё равно кладём в in-memory cache на всякий
-        _DAILY_LESSON_CACHE[cache_key] = lesson
+    # 4) Запоминаем, что эта тема уже выдавалась сегодня
+    topic = lesson.get("_topic")
+    if topic:
+        if hasattr(db, "save_today_topic"):
+            await db.save_today_topic(user_id=user_id, day=today, topic=topic)
+        else:
+            s = _TODAY_TOPICS.get(key, set())
+            s.add(topic)
+            _TODAY_TOPICS[key] = s
 
     # ---- Рендер урока ----
     title = html.quote(lesson.get("title", "🇧🇷 Урок"))
     explanation = html.quote(lesson.get("explanation", ""))
 
     lines = [f"<b>{title}</b>\n", explanation, "\n"]
-
     for ex in (lesson.get("examples") or [])[:3]:
         pt = html.quote(ex.get("portuguese", ""))
         ru = html.quote(ex.get("russian", ""))
@@ -234,10 +234,5 @@ async def callback_get_lesson(callback_query, db, config):
     await callback_query.message.answer("\n".join(lines), parse_mode="HTML")
     await callback_query.answer()
 
-    logger.info(
-        "User %s requested lesson day=%s topic=%s",
-        user_id,
-        today,
-        lesson.get("_topic") or lesson.get("id") or "unknown",
-    )
+    logger.info("User %s got lesson topic=%s day=%s", user_id, topic, today)
 
