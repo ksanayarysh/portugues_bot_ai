@@ -80,7 +80,7 @@ async def cmd_help(message: Message):
         "• Выбрать частоту уроков (от 2 раз в день до раза в неделю)\n"
         "• Установить удобное время\n"
         "• Выбрать часовой пояс\n\n"
-        "Есть вопросы? Пиши @your_support"
+        "Есть вопросы? Пиши @ksn_yr"
     )
     
     await message.answer(help_text, parse_mode="HTML")
@@ -189,4 +189,4 @@ async def callback_get_lesson(callback_query, db, config):
     await callback_query.message.answer("\n".join(lines), parse_mode="HTML")
     await callback_query.answer()
     
-    logger.info(f"User {user_id} requested lesson {lesson['id']}")
+    logger.info(f"User {user_id} requested lesson")
