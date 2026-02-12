@@ -310,8 +310,10 @@ class Database:
                 """,
                 user_id
             )
-            
-            return {
-                **dict(user) if user else {},
-                **dict(lessons_stats) if lessons_stats else {}
-            }
+
+            result = {}
+            if user:
+                result.update(dict(user))
+            if lessons_stats:
+                result.update(dict(lessons_stats))
+            return result
