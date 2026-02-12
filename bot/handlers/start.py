@@ -153,40 +153,91 @@ async def cmd_resume(message: Message, db):
 
 from aiogram import html
 
+from aiogram import html
+from datetime import date
+
+# простенький кэш на случай, если в db нет методов хранения урока
+_DAILY_LESSON_CACHE: dict[tuple[int, str], dict] = {}
+
+
 @router.callback_query(F.data == "get_lesson")
 async def callback_get_lesson(callback_query, db, config):
-    from bot.ai.generator import LessonGenerator  # <-- поправь путь, если у тебя иначе лежит generator.py
+    from bot.ai.generator import LessonGenerator  # путь у тебя такой, как в текущем файле
 
     user_id = callback_query.from_user.id
+    today = date.today().isoformat()
+    cache_key = (user_id, today)
 
-    gen = LessonGenerator(
-        api_key=config.ANTHROPIC_API_KEY,
-        model=getattr(config, "CLAUDE_MODEL", "claude-sonnet-4-20250514"),
-    )
+    # 1) Пытаемся достать "урок на сегодня" из БД, если у db есть такой метод
+    lesson = None
+    if hasattr(db, "get_daily_lesson"):
+        lesson = await db.get_daily_lesson(user_id=user_id, day=today)
 
-    # Можно брать тему из конфига/БД, пока просто дефолт:
-    lesson = gen.generate_lesson(topic="por_vs_para", level="intermediate")
+    # 2) Если в БД нет, пытаемся из памяти (переживает в рамках процесса)
+    if lesson is None:
+        lesson = _DAILY_LESSON_CACHE.get(cache_key)
 
+    # 3) Если урока на сегодня нет, генерим новый и сохраняем
+    if lesson is None:
+        gen = LessonGenerator(
+            api_key=config.ANTHROPIC_API_KEY,
+            model=getattr(config, "CLAUDE_MODEL", "claude-sonnet-4-20250514"),
+        )
+
+        # Берём статистику и историю тем (если у db есть методы)
+        user_stats = {}
+        if hasattr(db, "get_user_stats"):
+            user_stats = await db.get_user_stats(user_id) or {}
+
+        previous_topics: list[str] = []
+        if hasattr(db, "get_completed_topics"):
+            previous_topics = await db.get_completed_topics(user_id=user_id) or []
+        elif hasattr(db, "get_recent_lesson_topics"):
+            previous_topics = await db.get_recent_lesson_topics(user_id=user_id, limit=200) or []
+
+        lesson = gen.generate_personalized_lesson(
+            user_stats=user_stats,
+            previous_lessons=previous_topics,
+        )
+
+        # Сохраняем урок на сегодня (если db умеет)
+        if hasattr(db, "save_daily_lesson"):
+            await db.save_daily_lesson(
+                user_id=user_id,
+                day=today,
+                topic=lesson.get("_topic"),
+                level=lesson.get("_level"),
+                lesson_json=lesson,
+            )
+
+        # И всё равно кладём в in-memory cache на всякий
+        _DAILY_LESSON_CACHE[cache_key] = lesson
+
+    # ---- Рендер урока ----
     title = html.quote(lesson.get("title", "🇧🇷 Урок"))
     explanation = html.quote(lesson.get("explanation", ""))
 
     lines = [f"<b>{title}</b>\n", explanation, "\n"]
-    examples = lesson.get("examples") or []
-    for ex in examples[:3]:
+
+    for ex in (lesson.get("examples") or [])[:3]:
         pt = html.quote(ex.get("portuguese", ""))
         ru = html.quote(ex.get("russian", ""))
         note = html.quote(ex.get("note", ""))
         lines.append(f"• <b>{pt}</b>\n  {ru}\n  <i>{note}</i>\n")
 
-    tip = lesson.get("tip")
-    if tip:
-        lines.append(f"\n💡 <b>Совет:</b> {html.quote(tip)}")
+    if lesson.get("tip"):
+        lines.append(f"\n💡 <b>Совет:</b> {html.quote(lesson['tip'])}")
 
-    practice = lesson.get("practice")
-    if practice:
-        lines.append(f"\n\n✍️ <b>Практика:</b>\n{html.quote(practice)}")
+    if lesson.get("practice"):
+        lines.append(f"\n\n✍️ <b>Практика:</b>\n{html.quote(lesson['practice'])}")
 
     await callback_query.message.answer("\n".join(lines), parse_mode="HTML")
     await callback_query.answer()
-    
-    logger.info(f"User {user_id} requested lesson")
+
+    logger.info(
+        "User %s requested lesson day=%s topic=%s",
+        user_id,
+        today,
+        lesson.get("_topic") or lesson.get("id") or "unknown",
+    )
+
